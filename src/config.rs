@@ -169,6 +169,15 @@ pub fn get_league_configs() -> Vec<LeagueConfig> {
             kalshi_series_total: Some("KXNCAAFTOTAL"),
             kalshi_series_btts: None,
         },
+        // NCAA Basketball (March Madness)
+        LeagueConfig {
+            league_code: "ncaamb",
+            poly_prefix: "cbb",
+            kalshi_series_game: "KXNCAAMBGAME",
+            kalshi_series_spread: Some("KXNCAAMBSPREAD"),
+            kalshi_series_total: Some("KXNCAAMBTOTAL"),
+            kalshi_series_btts: None,
+        },
     ]
 }
 

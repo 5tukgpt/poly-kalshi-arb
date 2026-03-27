@@ -474,6 +474,7 @@ pub async fn run_ws(
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<KalshiWsMessage>(&text) {
                     Ok(kalshi_msg) => {
+                        debug!("[KALSHI] WS msg type={}", kalshi_msg.msg_type);
                         let ticker = kalshi_msg.msg.as_ref()
                             .and_then(|m| m.market_ticker.as_ref());
 

@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
     let heartbeat_state = state.clone();
     let heartbeat_threshold = threshold_cents;
     let heartbeat_handle = tokio::spawn(async move {
-        use crate::types::kalshi_fee_cents;
+        use crate::types::{kalshi_fee_cents, poly_sports_fee_cents};
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -288,16 +288,18 @@ async fn main() -> Result<()> {
                 if has_k && has_p {
                     with_both += 1;
 
-                    let fee1 = kalshi_fee_cents(k_no);
-                    let cost1 = p_yes + k_no + fee1;
+                    let k_fee1 = kalshi_fee_cents(k_no);
+                    let p_fee1 = poly_sports_fee_cents(p_yes);
+                    let cost1 = p_yes + k_no + k_fee1 + p_fee1;
 
-                    let fee2 = kalshi_fee_cents(k_yes);
-                    let cost2 = k_yes + fee2 + p_no;
+                    let k_fee2 = kalshi_fee_cents(k_yes);
+                    let p_fee2 = poly_sports_fee_cents(p_no);
+                    let cost2 = k_yes + k_fee2 + p_no + p_fee2;
 
                     let (best_cost, best_fee, is_poly_yes) = if cost1 <= cost2 {
-                        (cost1, fee1, true)
+                        (cost1, k_fee1 + p_fee1, true)
                     } else {
-                        (cost2, fee2, false)
+                        (cost2, k_fee2 + p_fee2, false)
                     };
 
                     if best_arb.is_none() || best_cost < best_arb.as_ref().unwrap().0 {
@@ -316,9 +318,9 @@ async fn main() -> Result<()> {
                     .map(|p| &*p.description)
                     .unwrap_or("Unknown");
                 let leg_breakdown = if is_poly_yes {
-                    format!("P_yes({}¢) + K_no({}¢) + K_fee({}¢) = {}¢", p_yes, k_no, fee, cost)
+                    format!("P_yes({}¢) + K_no({}¢) + fees({}¢) = {}¢", p_yes, k_no, fee, cost)
                 } else {
-                    format!("K_yes({}¢) + P_no({}¢) + K_fee({}¢) = {}¢", k_yes, p_no, fee, cost)
+                    format!("K_yes({}¢) + P_no({}¢) + fees({}¢) = {}¢", k_yes, p_no, fee, cost)
                 };
                 if gap <= 10 {
                     info!("   📊 Best: {} | {} | gap={:+}¢ | [P_yes={}¢ K_no={}¢ K_yes={}¢ P_no={}¢]",

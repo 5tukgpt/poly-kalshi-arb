@@ -164,10 +164,13 @@ impl AtomicMarketState {
 
         let k_yes_fee = KALSHI_FEE_TABLE[k_yes as usize];
         let k_no_fee = KALSHI_FEE_TABLE[k_no as usize];
+        let p_yes_fee = POLY_SPORTS_FEE_TABLE[p_yes as usize];
+        let p_no_fee = POLY_SPORTS_FEE_TABLE[p_no as usize];
 
         // Only check cross-platform arbs (no same-platform poly-poly or kalshi-kalshi)
-        let cost1 = (p_yes + k_no + k_no_fee) as i16;  // Poly YES + Kalshi NO
-        let cost2 = (k_yes + k_yes_fee + p_no) as i16; // Kalshi YES + Poly NO
+        // Include fees from BOTH platforms (Kalshi + Polymarket sports taker fee)
+        let cost1 = (p_yes + k_no + k_no_fee + p_yes_fee) as i16;  // Poly YES + Kalshi NO
+        let cost2 = (k_yes + k_yes_fee + p_no + p_no_fee) as i16; // Kalshi YES + Poly NO
         let threshold = threshold_cents as i16;
 
         let mut mask = 0u8;
@@ -199,6 +202,33 @@ pub fn kalshi_fee_cents(price_cents: PriceCents) -> PriceCents {
         return 0;
     }
     KALSHI_FEE_TABLE[price_cents as usize]
+}
+
+/// Polymarket sports taker fee table (101 entries for prices 0-100)
+/// Formula: ceil(feeRate × p² × (1-p)) in cents
+/// Sports: feeRate=0.03, exponent=1 → fee = 0.03 × p² × (1-p)
+/// Peak at p≈0.667 = 0.44¢ → always 0¢ or 1¢ after ceiling
+/// Effective March 30, 2026: https://docs.polymarket.com/trading/fees
+static POLY_SPORTS_FEE_TABLE: [u16; 101] = {
+    let mut table = [0u16; 101];
+    let mut p = 1u32;
+    while p < 100 {
+        // fee_cents = ceil(3 × p² × (100 - p) / 1_000_000)
+        let numerator = 3 * p * p * (100 - p) + 999_999;
+        table[p as usize] = (numerator / 1_000_000) as u16;
+        p += 1;
+    }
+    table
+};
+
+/// Calculate Polymarket sports taker fee in cents for a single contract
+/// For all prices 1-99 cents, fee is 1 cent (peak 0.44¢, ceiled)
+#[inline(always)]
+pub fn poly_sports_fee_cents(price_cents: PriceCents) -> PriceCents {
+    if price_cents > 100 {
+        return 0;
+    }
+    POLY_SPORTS_FEE_TABLE[price_cents as usize]
 }
 
 /// Convert f64 price (0.01-0.99) to PriceCents (1-99)
@@ -276,9 +306,9 @@ impl FastExecutionRequest {
     #[inline(always)]
     pub fn estimated_fee_cents(&self) -> PriceCents {
         match self.arb_type {
-            // Cross-platform: fee on the Kalshi side only
-            ArbType::PolyYesKalshiNo => kalshi_fee_cents(self.no_price),
-            ArbType::KalshiYesPolyNo => kalshi_fee_cents(self.yes_price),
+            // Cross-platform: Kalshi fee on Kalshi side + Polymarket sports taker fee on Poly side
+            ArbType::PolyYesKalshiNo => kalshi_fee_cents(self.no_price) + poly_sports_fee_cents(self.yes_price),
+            ArbType::KalshiYesPolyNo => kalshi_fee_cents(self.yes_price) + poly_sports_fee_cents(self.no_price),
         }
     }
 }
@@ -613,6 +643,47 @@ mod tests {
     }
 
     // =========================================================================
+    // poly_sports_fee_cents Tests - Polymarket sports taker fee
+    // =========================================================================
+
+    #[test]
+    fn test_poly_sports_fee_cents_formula() {
+        // Sports fee = ceil(0.03 × p² × (1-p)) in cents
+        // For all prices 1-99, the fee is 1¢ (peak 0.44¢ at p≈67, ceiled)
+        assert_eq!(poly_sports_fee_cents(50), 1);
+        assert_eq!(poly_sports_fee_cents(10), 1);
+        assert_eq!(poly_sports_fee_cents(90), 1);
+        assert_eq!(poly_sports_fee_cents(67), 1);  // Near peak
+        assert_eq!(poly_sports_fee_cents(1), 1);
+        assert_eq!(poly_sports_fee_cents(99), 1);
+    }
+
+    #[test]
+    fn test_poly_sports_fee_cents_edge_cases() {
+        // 0 and 100 should have no fee
+        assert_eq!(poly_sports_fee_cents(0), 0);
+        assert_eq!(poly_sports_fee_cents(100), 0);
+
+        // Values > 100 should return 0
+        assert_eq!(poly_sports_fee_cents(150), 0);
+    }
+
+    #[test]
+    fn test_poly_sports_fee_cents_matches_float_formula() {
+        // Verify integer formula matches float formula for all valid prices
+        for price_cents in 1..100u16 {
+            let p = price_cents as f64 / 100.0;
+            let float_fee = (0.03 * p * p * (1.0 - p) * 100.0).ceil() as u16;
+            let int_fee = poly_sports_fee_cents(price_cents);
+
+            assert!(
+                (int_fee as i16 - float_fee as i16).abs() <= 1,
+                "Fee mismatch at {}¢: int={}, float={}", price_cents, int_fee, float_fee
+            );
+        }
+    }
+
+    // =========================================================================
     // Price Conversion Tests
     // =========================================================================
 
@@ -672,8 +743,8 @@ mod tests {
     #[test]
     fn test_check_arbs_poly_yes_kalshi_no() {
         // Poly YES 40¢ + Kalshi NO 50¢ = 90¢ raw
-        // Kalshi fee on 50¢ = 2¢
-        // Effective = 92¢ → ARB (< 100¢ threshold)
+        // Kalshi fee on 50¢ = 2¢, Poly fee on 40¢ = 1¢
+        // Effective = 93¢ → ARB (< 100¢ threshold)
         let state = make_market_state(55, 50, 40, 65);
 
         // threshold_cents is in cents, so 100 = $1.00
@@ -685,8 +756,8 @@ mod tests {
     #[test]
     fn test_check_arbs_kalshi_yes_poly_no() {
         // Kalshi YES 40¢ + Poly NO 50¢ = 90¢ raw
-        // Kalshi fee on 40¢ = 2¢
-        // Effective = 92¢ → ARB
+        // Kalshi fee on 40¢ = 2¢, Poly fee on 50¢ = 1¢
+        // Effective = 93¢ → ARB
         let state = make_market_state(40, 65, 55, 50);
 
         let mask = state.check_arbs(100);
@@ -697,10 +768,8 @@ mod tests {
     #[test]
     fn test_check_arbs_no_arbs() {
         // All prices efficient - no arbs
-        // Cross: 55 + 55 + 2 fee = 112 > 100
-        // Cross: 52 + 52 + 2 fee = 106 > 100
-        // Poly: 52 + 52 = 104 > 100
-        // Kalshi: 55 + 55 + 4 fee = 114 > 100
+        // Cross: 55 + 55 + K_fee(2) + P_fee(1) = 113 > 100
+        // Cross: 52 + 52 + K_fee(2) + P_fee(1) = 107 > 100
         let state = make_market_state(55, 55, 52, 52);
 
         let mask = state.check_arbs(100);
@@ -721,21 +790,21 @@ mod tests {
     #[test]
     fn test_check_arbs_fees_eliminate_marginal() {
         // Poly YES 49¢ + Kalshi NO 50¢ = 99¢ raw
-        // Kalshi fee on 50¢ = 2¢
-        // Effective = 101¢ → NO ARB (> 100¢ threshold)
+        // Kalshi fee on 50¢ = 2¢, Poly fee on 49¢ = 1¢
+        // Effective = 102¢ → NO ARB (> 100¢ threshold)
         let state = make_market_state(55, 50, 49, 55);
 
         let mask = state.check_arbs(100);
 
-        // Bit 0 should NOT be set (Poly YES + Kalshi NO = 101¢ > 100¢)
+        // Bit 0 should NOT be set (Poly YES + Kalshi NO = 102¢ > 100¢)
         assert!(mask & 1 == 0, "Fees should eliminate marginal arb");
     }
 
     #[test]
     fn test_check_arbs_multiple_arbs() {
         // Scenario where both cross-platform arbs exist
-        // Poly YES 40¢ + Kalshi NO 40¢ + fee 2¢ = 82¢
-        // Kalshi YES 40¢ + Poly NO 40¢ + fee 2¢ = 82¢
+        // Poly YES 40¢ + Kalshi NO 40¢ + K_fee(2) + P_fee(1) = 83¢
+        // Kalshi YES 40¢ + Poly NO 40¢ + K_fee(2) + P_fee(1) = 83¢
         let state = make_market_state(40, 40, 40, 40);
 
         let mask = state.check_arbs(100);
@@ -870,8 +939,8 @@ mod tests {
     #[test]
     fn test_execution_request_profit_cents_poly_yes_kalshi_no() {
         // Poly YES 40¢ + Kalshi NO 50¢ = 90¢
-        // Kalshi fee on 50¢ = 2¢
-        // Profit = 100 - 90 - 2 = 8¢
+        // Kalshi fee on 50¢ = 2¢, Poly fee on 40¢ = 1¢
+        // Profit = 100 - 90 - 2 - 1 = 7¢
         let req = FastExecutionRequest {
             market_id: 0,
             yes_price: 40,
@@ -882,14 +951,14 @@ mod tests {
             detected_ns: 0,
         };
 
-        assert_eq!(req.profit_cents(), 8);
+        assert_eq!(req.profit_cents(), 7);
     }
 
     #[test]
     fn test_execution_request_profit_cents_kalshi_yes_poly_no() {
         // Kalshi YES 40¢ + Poly NO 50¢ = 90¢
-        // Kalshi fee on 40¢ = 2¢
-        // Profit = 100 - 90 - 2 = 8¢
+        // Kalshi fee on 40¢ = 2¢, Poly fee on 50¢ = 1¢
+        // Profit = 100 - 90 - 2 - 1 = 7¢
         let req = FastExecutionRequest {
             market_id: 0,
             yes_price: 40,
@@ -900,7 +969,7 @@ mod tests {
             detected_ns: 0,
         };
 
-        assert_eq!(req.profit_cents(), 8);
+        assert_eq!(req.profit_cents(), 7);
     }
 
     #[test]
@@ -921,7 +990,7 @@ mod tests {
 
     #[test]
     fn test_execution_request_estimated_fee() {
-        // PolyYesKalshiNo → fee on Kalshi NO
+        // PolyYesKalshiNo → Kalshi fee on NO + Poly fee on YES
         let req1 = FastExecutionRequest {
             market_id: 0,
             yes_price: 40,
@@ -931,9 +1000,9 @@ mod tests {
             arb_type: ArbType::PolyYesKalshiNo,
             detected_ns: 0,
         };
-        assert_eq!(req1.estimated_fee_cents(), kalshi_fee_cents(50));
+        assert_eq!(req1.estimated_fee_cents(), kalshi_fee_cents(50) + poly_sports_fee_cents(40));
 
-        // KalshiYesPolyNo → fee on Kalshi YES
+        // KalshiYesPolyNo → Kalshi fee on YES + Poly fee on NO
         let req2 = FastExecutionRequest {
             market_id: 0,
             yes_price: 40,
@@ -943,7 +1012,7 @@ mod tests {
             arb_type: ArbType::KalshiYesPolyNo,
             detected_ns: 0,
         };
-        assert_eq!(req2.estimated_fee_cents(), kalshi_fee_cents(40));
+        assert_eq!(req2.estimated_fee_cents(), kalshi_fee_cents(40) + poly_sports_fee_cents(50));
     }
 
     // =========================================================================

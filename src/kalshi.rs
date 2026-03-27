@@ -635,6 +635,28 @@ fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &Kals
 
     // Store
     market.kalshi.store(yes_ask, no_ask, yes_size, no_size);
+
+    // Diagnostic: log first few snapshots to verify values being stored
+    static SNAP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+    let snap_count = SNAP_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if snap_count < 5 {
+        let yes_levels = body.yes.as_ref().map(|v| v.len()).unwrap_or(0);
+        let no_levels = body.no.as_ref().map(|v| v.len()).unwrap_or(0);
+        info!("[KALSHI] Snapshot store #{}: yes_ask={} no_ask={} yes_sz={} no_sz={} | yes_levels={} no_levels={} | ticker={:?}",
+              snap_count, yes_ask, no_ask, yes_size, no_size, yes_levels, no_levels,
+              body.market_ticker.as_deref().unwrap_or("?"));
+        // Log raw first level if exists
+        if let Some(levels) = &body.yes {
+            if let Some(first) = levels.first() {
+                info!("[KALSHI]   yes[0] = {:?}", first);
+            }
+        }
+        if let Some(levels) = &body.no {
+            if let Some(first) = levels.first() {
+                info!("[KALSHI]   no[0] = {:?}", first);
+            }
+        }
+    }
 }
 
 /// Process Kalshi orderbook delta
@@ -689,6 +711,16 @@ fn process_kalshi_delta(market: &crate::types::AtomicMarketState, body: &KalshiW
     };
 
     market.kalshi.store(yes_ask, no_ask, yes_size, no_size);
+
+    // Diagnostic: log first few deltas with non-zero values
+    static DELTA_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+    if yes_ask > 0 || no_ask > 0 {
+        let dcount = DELTA_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        if dcount < 5 {
+            info!("[KALSHI] Delta store #{}: yes_ask={} no_ask={} | ticker={:?}",
+                  dcount, yes_ask, no_ask, body.market_ticker.as_deref().unwrap_or("?"));
+        }
+    }
 }
 
 /// Send arb request from Kalshi handler

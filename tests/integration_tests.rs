@@ -598,7 +598,7 @@ mod infra_integration_tests {
             detected_ns: 0,
         };
 
-        assert_eq!(req.profit_cents(), 8, "Profit should be 8¢");
+        assert_eq!(req.profit_cents(), 7, "Profit should be 7¢ (Kalshi fee 2¢ + Poly sports fee 1¢)");
     }
 
     /// Test: FastExecutionRequest handles negative profit
@@ -1806,7 +1806,7 @@ mod process_mock_tests {
     /// Test: Cross-platform fee calculation (fee only on Kalshi side)
     #[test]
     fn test_cross_platform_single_fee() {
-        use arb_bot::types::kalshi_fee_cents;
+        use arb_bot::types::{kalshi_fee_cents, poly_sports_fee_cents};
 
         // PolyYesKalshiNo: fee on Kalshi NO side
         let req1 = FastExecutionRequest {
@@ -1818,8 +1818,8 @@ mod process_mock_tests {
             arb_type: ArbType::PolyYesKalshiNo,
             detected_ns: 0,
         };
-        assert_eq!(req1.estimated_fee_cents(), kalshi_fee_cents(50),
-            "PolyYesKalshiNo fee should be on NO side (50¢)");
+        assert_eq!(req1.estimated_fee_cents(), kalshi_fee_cents(50) + poly_sports_fee_cents(40),
+            "PolyYesKalshiNo fee should be Kalshi fee on NO (50¢) + Poly sports fee on YES (40¢)");
 
         // KalshiYesPolyNo: fee on Kalshi YES side
         let req2 = FastExecutionRequest {
@@ -1831,8 +1831,8 @@ mod process_mock_tests {
             arb_type: ArbType::KalshiYesPolyNo,
             detected_ns: 0,
         };
-        assert_eq!(req2.estimated_fee_cents(), kalshi_fee_cents(40),
-            "KalshiYesPolyNo fee should be on YES side (40¢)");
+        assert_eq!(req2.estimated_fee_cents(), kalshi_fee_cents(40) + poly_sports_fee_cents(50),
+            "KalshiYesPolyNo fee should be Kalshi fee on YES (40¢) + Poly sports fee on NO (50¢)");
     }
 
     /// Test: Both cross-platform types have same fees (one Kalshi side each)

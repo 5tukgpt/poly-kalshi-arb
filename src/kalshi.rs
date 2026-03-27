@@ -24,6 +24,7 @@ use crate::types::{
     KalshiEventsResponse, KalshiMarketsResponse, KalshiEvent, KalshiMarket,
     GlobalState, FastExecutionRequest, ArbType, PriceCents, SizeCents, fxhash_str,
 };
+use std::sync::atomic::AtomicU64;
 
 // === Order Types ===
 
@@ -469,23 +470,77 @@ pub async fn run_ws(
 
     let clock = NanoClock::new();
 
+    // Diagnostic counters for heartbeat visibility
+    static KALSHI_MSG_TOTAL: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_PARSED: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_NO_TICKER: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_NO_HASH: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_DELTA: AtomicU64 = AtomicU64::new(0);
+    static KALSHI_MSG_PARSE_ERR: AtomicU64 = AtomicU64::new(0);
+
+    // Reset counters on each WS connect
+    KALSHI_MSG_TOTAL.store(0, Ordering::Relaxed);
+    KALSHI_MSG_PARSED.store(0, Ordering::Relaxed);
+    KALSHI_MSG_NO_TICKER.store(0, Ordering::Relaxed);
+    KALSHI_MSG_NO_HASH.store(0, Ordering::Relaxed);
+    KALSHI_MSG_SNAPSHOT.store(0, Ordering::Relaxed);
+    KALSHI_MSG_DELTA.store(0, Ordering::Relaxed);
+    KALSHI_MSG_PARSE_ERR.store(0, Ordering::Relaxed);
+
+    // Spawn diagnostic logger (every 60s, aligned with heartbeat)
+    let _diag_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let total = KALSHI_MSG_TOTAL.load(Ordering::Relaxed);
+            let parsed = KALSHI_MSG_PARSED.load(Ordering::Relaxed);
+            let no_ticker = KALSHI_MSG_NO_TICKER.load(Ordering::Relaxed);
+            let no_hash = KALSHI_MSG_NO_HASH.load(Ordering::Relaxed);
+            let snapshots = KALSHI_MSG_SNAPSHOT.load(Ordering::Relaxed);
+            let deltas = KALSHI_MSG_DELTA.load(Ordering::Relaxed);
+            let parse_err = KALSHI_MSG_PARSE_ERR.load(Ordering::Relaxed);
+            info!("[KALSHI] WS diag | msgs={} parsed={} no_ticker={} no_hash={} snapshots={} deltas={} parse_err={}",
+                  total, parsed, no_ticker, no_hash, snapshots, deltas, parse_err);
+        }
+    });
+
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                KALSHI_MSG_TOTAL.fetch_add(1, Ordering::Relaxed);
                 match serde_json::from_str::<KalshiWsMessage>(&text) {
                     Ok(kalshi_msg) => {
+                        KALSHI_MSG_PARSED.fetch_add(1, Ordering::Relaxed);
                         debug!("[KALSHI] WS msg type={}", kalshi_msg.msg_type);
                         let ticker = kalshi_msg.msg.as_ref()
                             .and_then(|m| m.market_ticker.as_ref());
 
-                        let Some(ticker) = ticker else { continue };
+                        let Some(ticker) = ticker else {
+                            KALSHI_MSG_NO_TICKER.fetch_add(1, Ordering::Relaxed);
+                            // Log first few no-ticker messages to diagnose format
+                            let count = KALSHI_MSG_NO_TICKER.load(Ordering::Relaxed);
+                            if count <= 3 {
+                                info!("[KALSHI] WS msg type={} has no market_ticker (sample {}/3): {}",
+                                      kalshi_msg.msg_type, count, &text[..text.len().min(200)]);
+                            }
+                            continue;
+                        };
                         let ticker_hash = fxhash_str(ticker);
 
-                        let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else { continue };
+                        let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else {
+                            KALSHI_MSG_NO_HASH.fetch_add(1, Ordering::Relaxed);
+                            let count = KALSHI_MSG_NO_HASH.load(Ordering::Relaxed);
+                            if count <= 3 {
+                                info!("[KALSHI] WS ticker={} not in hash map (sample {}/3)", ticker, count);
+                            }
+                            continue;
+                        };
                         let market = &state.markets[market_id as usize];
 
                         match kalshi_msg.msg_type.as_str() {
                             "orderbook_snapshot" => {
+                                KALSHI_MSG_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
                                 if let Some(body) = &kalshi_msg.msg {
                                     process_kalshi_snapshot(market, body);
 
@@ -497,6 +552,7 @@ pub async fn run_ws(
                                 }
                             }
                             "orderbook_delta" => {
+                                KALSHI_MSG_DELTA.fetch_add(1, Ordering::Relaxed);
                                 if let Some(body) = &kalshi_msg.msg {
                                     process_kalshi_delta(market, body);
 
@@ -510,8 +566,12 @@ pub async fn run_ws(
                         }
                     }
                     Err(e) => {
-                        // Log at trace level - unknown message types are normal
-                        tracing::trace!("[KALSHI] WS parse error: {} (msg: {}...)", e, &text[..text.len().min(100)]);
+                        KALSHI_MSG_PARSE_ERR.fetch_add(1, Ordering::Relaxed);
+                        let count = KALSHI_MSG_PARSE_ERR.load(Ordering::Relaxed);
+                        if count <= 5 {
+                            info!("[KALSHI] WS parse error (sample {}/5): {} | raw: {}",
+                                  count, e, &text[..text.len().min(300)]);
+                        }
                     }
                 }
             }

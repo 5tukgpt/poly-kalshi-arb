@@ -12,7 +12,12 @@ const CACHE_FILE: &str = "kalshi_team_cache.json";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamCache {
     /// Forward: "league:poly_code" -> "kalshi_code"
-    #[serde(serialize_with = "serialize_boxed_map", deserialize_with = "deserialize_boxed_map")]
+    /// JSON key is "mappings" but we call it "forward" in code for clarity
+    #[serde(
+        rename = "mappings",
+        serialize_with = "serialize_boxed_map",
+        deserialize_with = "deserialize_boxed_map"
+    )]
     forward: HashMap<Box<str>, Box<str>>,
     /// Reverse: "league:kalshi_code" -> "poly_code"
     #[serde(skip)]

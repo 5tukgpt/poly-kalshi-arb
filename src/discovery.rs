@@ -484,20 +484,10 @@ impl DiscoveryClient {
         let base = format!("{}-{}-{}-{}", poly_prefix, poly_team1, poly_team2, date_str);
         
         match market_type {
-            MarketType::Moneyline => {
-                if let Some(suffix) = extract_team_suffix(&market.ticker) {
-                    if suffix.to_lowercase() == "tie" {
-                        format!("{}-draw", base)
-                    } else {
-                        let poly_suffix = self.team_cache
-                            .kalshi_to_poly(poly_prefix, &suffix)
-                            .unwrap_or_else(|| suffix.to_lowercase());
-                        format!("{}-{}", base, poly_suffix)
-                    }
-                } else {
-                    base
-                }
-            }
+            // Polymarket moneyline = bare event slug (e.g. "nhl-dal-phi-2026-03-29")
+            // No team suffix — it's a single binary market (YES = team1 wins, NO = team2 wins).
+            // Kalshi has per-team outcome markets (DAL, PHI) but they all map to the same Poly slug.
+            MarketType::Moneyline => base,
             MarketType::Spread => {
                 if let Some(floor) = market.floor_strike {
                     let floor_str = format!("{:.1}", floor).replace(".", "pt");
